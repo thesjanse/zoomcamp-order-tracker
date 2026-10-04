@@ -54,7 +54,7 @@ class AgentRunner:
 
     def build_prompt(self, incident: dict, evidence: Evidence) -> str:
         sections = [
-            _TASK_HEADER,
+            _render_task_header(self.config.repo_root),
             _render_alert(incident, evidence),
             _render_logs(evidence),
             _render_traces(evidence),
@@ -84,6 +84,12 @@ class AgentRunner:
             )
 
         command = [self.config.opencode_bin, "run", "--format", "json"]
+        # opencode resolves the directory it works in from $PWD when this is absent,
+        # and $PWD is left untouched by the cwd= below. Starting this service from
+        # incident-response/, as the README says to, then roots every glob and grep
+        # at the responder's own source: the model reads this package instead of the
+        # code under test and never finds the failing endpoint.
+        command += ["--dir", str(self.config.repo_root)]
         if self.config.opencode_agent:
             command += ["--agent", self.config.opencode_agent]
         if self.config.opencode_model:
@@ -104,6 +110,10 @@ class AgentRunner:
                 process = await asyncio.create_subprocess_exec(
                     *command,
                     cwd=self.config.repo_root,
+                    # --dir makes opencode chdir, but chdir does not rewrite $PWD for
+                    # the shell tools it spawns, so they would inherit a $PWD that
+                    # disagrees with their own cwd.
+                    env={**os.environ, "PWD": str(self.config.repo_root)},
                     stdout=events,
                     stderr=asyncio.subprocess.PIPE,
                     # The agent has its own permission allow-list; it must not be
@@ -400,13 +410,14 @@ def _tail(raw: bytes | str | None, limit: int = 2000) -> str:
 # Prompt sections ---------------------------------------------------------
 
 
-_TASK_HEADER = """\
+def _render_task_header(repo_root: Path) -> str:
+    return f"""\
 An alert fired on a service in this repository and you are being invoked
 unattended to diagnose and fix it. Everything you need is below; you do not need
 to ask questions and there is nobody to answer them.
 
-Work inside the current checkout, which is already on a branch dedicated to this
-incident."""
+You are in the repository root, `{repo_root}`, already on a branch dedicated to
+this incident. Search with paths relative to it and do not `cd` anywhere."""
 
 _TASK_FOOTER = """\
 What to do:

@@ -126,6 +126,45 @@ async def test_dry_run_never_touches_git_or_the_assistant(config: Config, incide
 
 
 @pytest.mark.asyncio
+async def test_run_pins_the_assistant_to_the_repository_root(live_config, incident, evidence, tmp_path):
+    """The assistant must be told where the code is, not left to guess from $PWD.
+
+    opencode takes the directory it works in from $PWD when --dir is absent, and
+    subprocess(cwd=...) leaves $PWD pointing at whatever directory this service
+    was started in. Started from incident-response/, as the README says to, every
+    glob and grep then resolves inside the responder's own package and the model
+    never finds the code under test.
+    """
+    seen = tmp_path / "seen"
+    fake = tmp_path / "fake-opencode"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\0" "$@" > {seen}.argv\n'
+        f'printf "%s\\0" "$PWD" > {seen}.pwd\n'
+        f'pwd >> {seen}.pwd\n'
+        'echo \'{"type":"text","sessionID":"ses_1","part":{"type":"text",'
+        '"text":"Nothing to fix."}}\'\n'
+    )
+    fake.chmod(0o755)
+    runner = AgentRunner(dataclasses.replace(live_config, opencode_bin=str(fake)))
+
+    result = await runner.run(incident=incident, evidence=evidence, evidence_dir=tmp_path / "ev")
+
+    assert result.status == "done", result.error
+    root = str(live_config.repo_root)
+    argv = (tmp_path / "seen.argv").read_text().split("\0")[:-1]
+    assert "--dir" in argv
+    assert argv[argv.index("--dir") + 1] == root
+    # The last positional is the prompt, so the flags must precede it.
+    assert argv[-1].startswith("An alert fired on a service")
+    assert argv[-2].startswith("incident 20261004T161515")
+    pwd, cwd = (s.strip() for s in (tmp_path / "seen.pwd").read_text().split("\0")[:2])
+    assert pwd == cwd == root
+    # Named in the prompt too, so the model is not left inferring it.
+    assert root in (tmp_path / "ev" / "prompt.md").read_text()
+
+
+@pytest.mark.asyncio
 async def test_run_invokes_the_assistant_and_records_the_commit(live_config, incident, evidence, tmp_path):
     """End to end through a fake assistant binary that commits like the real one."""
     fake = tmp_path / "fake-opencode"
