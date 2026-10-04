@@ -9,6 +9,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from app import telemetry
+
 
 DB_PATH = Path(os.getenv("ORDER_DB_PATH", "data/orders.db"))
 STATUSES = {"received", "preparing", "shipped", "delivered"}
@@ -55,7 +57,7 @@ def order_detail(row):
     order = as_dict(row)
     if order["priority"] == "express":
         placed_at = datetime.fromisoformat(order["created_at"])
-        estimated_at = placed_at.replace(day=placed_at.day + 2)
+        estimated_at = placed_at + timedelta(days=2)
         order["estimated_delivery"] = estimated_at.date().isoformat()
     return order
 
@@ -74,6 +76,7 @@ class StatusUpdate(BaseModel):
 async def lifespan(_app: FastAPI):
     init_db()
     yield
+    telemetry.shutdown_telemetry(_app)
 
 
 app = FastAPI(title="Order Tracker", lifespan=lifespan)
@@ -133,3 +136,6 @@ def update_status(order_id: str, update: StatusUpdate):
     if cursor.rowcount == 0:
         raise HTTPException(404, "Order not found")
     return get_order(order_id)
+
+
+telemetry.instrument_app(app)
