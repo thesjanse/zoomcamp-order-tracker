@@ -1,0 +1,131 @@
+# Grafana unified alerting rules, provisioned from this file.
+#
+# The rule is silent on its own: delivery is configured in incident-response.yaml,
+# which provisions the webhook contact point and the policy tree that routes to it.
+# Without both of those the rule still evaluates and still shows up under
+# Alerting -> Alert rules, but nothing is sent anywhere.
+#
+# Editing this file needs `docker compose restart grafana` to take effect.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: order-tracker
+    folder: Order Tracker
+    interval: 30s
+    rules:
+      - uid: order-tracker-5xx
+        # Static on purpose: the provisioning API rewrites templated titles and
+        # drops $labels. The endpoint is in the summary annotation instead.
+        title: 5xx responses on an order lookup endpoint
+        condition: C
+        data:
+          # Was there a 5xx on this endpoint in the last 5 minutes? One series
+          # per endpoint, from the route template rather than the concrete path.
+          #
+          # This needs two branches because order_lookup_requests_total is a
+          # cumulative counter that the app re-exports every 5s for as long as
+          # it runs, so neither a plain counter nor a plain range query can
+          # bound the window:
+          #
+          #   increase() is a difference across the window, and a first 5xx
+          #   creates the series already at 1, so it reads 0 and the alert would
+          #   miss the very error it exists for. This branch catches every
+          #   increment after that first one.
+          #
+          #   count_over_time() would find the series present forever, because
+          #   the app keeps re-sending the last value. This branch instead looks
+          #   for the series existing now but not 5 minutes ago, which is true
+          #   for exactly the 5 minutes after an endpoint's first 5xx.
+          #
+          # Either branch stops being true 5 minutes after the last 5xx, which is
+          # what puts the rule back to Normal. service_name is the collector's
+          # translation of the service.name resource attribute, and is hardcoded
+          # because alert rules cannot read the dashboard's $service variable.
+          - refId: A
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: >-
+                (
+                  sum by (http_route, http_request_method) (
+                    increase(order_lookup_requests_total{
+                      service_name="order-tracker",
+                      http_response_status_code=~"5.."
+                    }[5m])
+                  ) > bool 0
+                )
+                or
+                (
+                  sum by (http_route, http_request_method) (
+                    order_lookup_requests_total{
+                      service_name="order-tracker",
+                      http_response_status_code=~"5.."
+                    }
+                  )
+                  unless
+                  sum by (http_route, http_request_method) (
+                    order_lookup_requests_total{
+                      service_name="order-tracker",
+                      http_response_status_code=~"5.."
+                    } offset 5m
+                  )
+                )
+              datasource:
+                type: prometheus
+                uid: prometheus
+          # Running total of 5xx on the endpoint, for the annotation text only.
+          - refId: B
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: B
+              instant: true
+              editorMode: code
+              expr: >-
+                sum by (http_route, http_request_method) (
+                  order_lookup_requests_total{
+                    service_name="order-tracker",
+                    http_response_status_code=~"5.."
+                  })
+              datasource:
+                type: prometheus
+                uid: prometheus
+          # Fire when at least one 5xx landed inside the window.
+          - refId: C
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: '-100'
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - type: query
+                  query: {params: [C]}
+                  reducer: {params: [], type: last}
+                  operator: {type: and}
+                  evaluator: {params: [0], type: gt}
+        # A quiet period returns no series at all, which Prometheus reports as an
+        # empty vector, so OK sends the rule back to Normal instead of leaving it
+        # in NoData. The trade-off is that a dead telemetry pipeline also looks
+        # quiet; an absent() rule would be the way to cover that.
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        isPaused: false
+        labels:
+          severity: critical
+        annotations:
+          summary: "5xx responses on {{ $labels.http_request_method }} {{ $labels.http_route }}"
+          description: >-
+            {{ $values.B }} 5xx response(s) so far on
+            {{ $labels.http_request_method }} {{ $labels.http_route }}
+            (service_name=order-tracker), and at least one of them landed in the
+            last 5 minutes. Window: 5m, rule evaluated every 30s, fires
+            immediately (for: 0s) and clears 5 minutes after the last 5xx.
+          # Absolute link for notification bodies. It breaks if GRAFANA_PORT is
+          # overridden.
+          dashboard_link: "http://127.0.0.1:3000/d/order-tracker-requests?orgId=1&viewPanel=6&var-service=order-tracker&var-route={{ $labels.http_route }}"

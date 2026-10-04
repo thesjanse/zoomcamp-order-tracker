@@ -1,0 +1,56 @@
+apiVersion: 1
+
+# Datasource UIDs are fixed so the provisioned dashboard JSON can reference
+# them without depending on Grafana's auto-generated UIDs.
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    orgId: 1
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: GET
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    orgId: 1
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000
+      # Log bodies are plain text, but the OTel log attributes Loki stores
+      # (order_lookup_outcome, trace_id, error_type, ...) are queryable, so a
+      # single lookup can be followed into Tempo by its trace_id.
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    orgId: 1
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      httpMethod: GET
+      # Drives the node graph on the Tempo datasource page.
+      nodeGraph:
+        enabled: true
+      serviceMap:
+        datasourceUid: prometheus
+      # Lets a span link straight to the RED metrics derived from it.
+      tracesToMetrics:
+        datasourceUid: prometheus
+        spanStartTimeShift: -1h
+        spanEndTimeShift: 1h
+        tags:
+          - key: service.name
+            value: service
+      # Tempo has stream_over_http_enabled: true, so search and metrics
+      # results stream instead of waiting for the whole response.
+      streamingEnabled:
+        search: true
+        metrics: true
