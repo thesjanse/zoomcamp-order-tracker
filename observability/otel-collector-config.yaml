@@ -1,0 +1,95 @@
+# Single OTLP entry point for the app. Every signal the app produces is
+# received here and fanned out to the right backend.
+#
+#   metrics -> prometheus exporter on :8889, scraped by Prometheus
+#   logs    -> Loki's native OTLP endpoint
+#   traces  -> Tempo
+#
+# The app only ever talks to this collector, so backends can be added or
+# replaced without touching app code.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  resource_detection:
+    detectors: [env, system]
+    timeout: 2s
+    override: false
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+exporters:
+  otlp_http/loki:
+    endpoint: http://loki:3100/otlp
+    sending_queue:
+      enabled: true
+    retry_on_failure:
+      enabled: true
+
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+    sending_queue:
+      enabled: true
+    retry_on_failure:
+      enabled: true
+
+  # Exposes everything the collector received, including app metrics, for
+  # Prometheus to scrape. No /metrics route is added to the app itself.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    enable_open_metrics: true
+    translation_strategy: UnderscoreEscapingWithSuffixes
+    resource_constant_labels:
+      included:
+        - service.name
+        - service.namespace
+        - service.instance.id
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      readers:
+        # service.telemetry.metrics.address is ignored as of collector
+        # v0.123.0; readers is the current form. without_type_suffix and
+        # without_units keep the otelcol_* names stable.
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+                without_type_suffix: true
+                without_units: true
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource_detection, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource_detection, batch]
+      exporters: [otlp_http/loki]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource_detection, batch]
+      exporters: [otlp_grpc/tempo]
