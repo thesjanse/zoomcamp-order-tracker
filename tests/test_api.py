@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -129,3 +129,35 @@ def test_lookup_metrics_carry_route_and_status(client, lookup_points):
         ("/api/orders/{order_id}", 404),
     }
     assert all(point.count == 1 and point.sum >= 0 for _, point in timed)
+
+
+def test_express_order_placed_at_month_end_is_looked_up_without_5xx(client, lookup_points):
+    """Regression for incident 20261005T181305-efae02.
+
+    An express order placed on the last day of a month must not make
+    GET /api/orders/{order_id} raise, and the lookup must be counted as a
+    success rather than as a 5xx in the order lookup telemetry.
+    """
+    with main.connect() as db:
+        db.execute(
+            "INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "express-month-end",
+                "Sam",
+                "Headphones",
+                "express",
+                "preparing",
+                datetime(2026, 1, 31, 23, 30, tzinfo=timezone.utc).isoformat(),
+            ),
+        )
+
+    response = client.get("/api/orders/express-month-end")
+
+    assert response.status_code == 200
+    assert response.json()["estimated_delivery"] == "2026-02-02"
+
+    counted = {
+        (attributes["http.route"], attributes["http.response.status_code"]): point.value
+        for attributes, point in lookup_points()["order.lookup.requests"]
+    }
+    assert counted == {("/api/orders/{order_id}", 200): 1}
